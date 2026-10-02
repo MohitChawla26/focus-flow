@@ -25,6 +25,7 @@ export type ContentItem = {
 };
 
 export type ContentAnalysis = {
+  catchyTitle: string;
   summary: string;
   category: string;
   urgency: number;

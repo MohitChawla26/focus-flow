@@ -1,7 +1,5 @@
-import { DashboardClient } from "@/components/dashboard/dashboard-client";
-import { binodProfile, demoItems } from "@/data/demo";
-import { scoreAll } from "@/services/importanceScoring";
+import { LandingHero } from "@/components/landing/landing-hero";
 
-export default function Home() {
-  return <DashboardClient initialItems={scoreAll(demoItems, binodProfile)} />;
+export default function HomePage() {
+  return <LandingHero />;
 }

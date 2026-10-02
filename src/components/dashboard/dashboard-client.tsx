@@ -1,76 +1,289 @@
 "use client";
 
 import {
-  Archive, Bell, Bookmark, BookmarkCheck, BrainCircuit, Check, ChevronDown, Clock3, CloudRain,
-  ExternalLink, EyeOff, FileText, Flame, Inbox, Layers3, Lightbulb, Menu, Newspaper,
-  Plus, RefreshCw, Rss, Search, Settings, Sparkles, TimerReset, TrendingUp, Video, X,
+  Bell, Bookmark, BookmarkCheck, CalendarClock, Check, CheckCircle2, ChevronRight,
+  CircleGauge, ExternalLink, EyeOff, Flame, FolderKanban, Inbox, LayoutDashboard, ListFilter,
+  Loader2, LogOut, Menu, Plus, RefreshCw, Rss, Search, Sparkles, Trash2, UserRound, X,
 } from "lucide-react";
-import { useMemo, useState } from "react";
 import { useRouter } from "next/navigation";
-import { Area, AreaChart, Bar, BarChart, CartesianGrid, Cell, Pie, PieChart, ResponsiveContainer, Tooltip, XAxis, YAxis } from "recharts";
-import type { ScoredContentItem } from "@/types";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+
 import { createClient } from "@/lib/supabase/client";
+import { AttentionOverview } from "@/components/dashboard/attention-overview";
+import { ThemeToggle } from "@/components/theme-toggle";
+import type { Database } from "@/types/database";
+import type { ScoredContentItem } from "@/types";
 
-type View = "feed" | "digest" | "clusters" | "saved" | "insights" | "sources" | "settings";
-const navItems: Array<{ id: View; label: string; icon: typeof Inbox }> = [
-  { id: "feed", label: "Smart Feed", icon: Inbox }, { id: "digest", label: "Catch Me Up", icon: Sparkles },
-  { id: "clusters", label: "Clusters", icon: Layers3 }, { id: "saved", label: "Saved", icon: Bookmark },
-  { id: "insights", label: "Insights", icon: TrendingUp }, { id: "sources", label: "Sources", icon: Rss },
-  { id: "settings", label: "Settings", icon: Settings },
-];
-const priorityStyles = {
-  critical: "bg-[#ffe8e5] text-[#9f2e26] border-[#f4c5c0]", high: "bg-[#fff2dc] text-[#8e5a0b] border-[#f2d7a8]",
-  medium: "bg-[#e9f3ff] text-[#285f92] border-[#cfe2f6]", low: "bg-[#f0f2f1] text-[#68736e] border-[#e0e4e2]",
+type Priority = Database["public"]["Enums"]["priority_level"];
+type View = "overview" | "feed" | "projects" | "priorities" | "saved" | "insights" | "sources" | "profile";
+type Interest = { topic: string; priority: Priority };
+type SourceStatus = { name: string; description: string; configured: boolean };
+type Project = {
+  id: string;
+  title: string;
+  details: string;
+  priority: Priority;
+  deadline: string | null;
+  status: string;
+  created_at: string;
 };
-const sourceIcons: Record<string, typeof Newspaper> = { college: FileText, sports: Flame, technology: BrainCircuit, weather: CloudRain, youtube: Video, research: FileText, social: TrendingUp, news: Newspaper, rss: Rss };
 
-function relativeTime(value?: string) {
+type DashboardProps = {
+  initialItems: ScoredContentItem[];
+  initialReadItemIds: string[];
+  initialHiddenItemIds: string[];
+  initialSavedItemIds: string[];
+  initialProjects: Project[];
+  userName: string;
+  userEmail: string;
+  interests: Interest[];
+  sourceStatuses: SourceStatus[];
+  nowIso: string;
+  currentDate: string;
+  greeting: string;
+};
+
+const PAGE_SIZE = 12;
+const panel = "rounded-[var(--radius)] border border-[var(--border)] bg-[var(--panel)] shadow-[var(--shadow-soft)]";
+const priorityTone = {
+  critical: { border: "border-[var(--critical)]", text: "text-[var(--critical)]", soft: "bg-[var(--critical-soft)]", label: "Must see" },
+  high: { border: "border-[var(--high)]", text: "text-[var(--high)]", soft: "bg-[var(--high-soft)]", label: "High" },
+  medium: { border: "border-[var(--medium)]", text: "text-[var(--medium)]", soft: "bg-[var(--medium-soft)]", label: "Medium" },
+  low: { border: "border-[var(--low)]", text: "text-[var(--low)]", soft: "bg-[var(--low-soft)]", label: "Low" },
+} as const;
+
+function relativeTime(value: string | undefined, nowIso: string) {
   if (!value) return "Recently";
-  const mins = Math.max(1, Math.round((Date.now() - new Date(value).getTime()) / 60_000));
-  if (mins < 60) return `${mins}m ago`;
-  const hours = Math.round(mins / 60);
+  const minutes = Math.max(1, Math.round((new Date(nowIso).getTime() - new Date(value).getTime()) / 60_000));
+  if (minutes < 60) return `${minutes}m ago`;
+  const hours = Math.round(minutes / 60);
   return hours < 24 ? `${hours}h ago` : `${Math.round(hours / 24)}d ago`;
 }
-function Logo() { return <div className="flex items-center gap-3"><div className="relative grid h-10 w-10 place-items-center rounded-[13px] bg-[#1f4739] text-white shadow-sm"><div className="h-4 w-4 rounded-full border-[3px] border-[#d8f26a]"/><div className="absolute right-[9px] top-[8px] h-2 w-2 rounded-full bg-[#d8f26a]"/></div><div><div className="text-[19px] font-bold tracking-[-.04em]">FocusFlow</div><div className="text-[11px] font-medium text-[#7a857f]">ATTENTION, INTELLIGENTLY</div></div></div>; }
 
-function Sidebar({ view, setView, open, close }: { view: View; setView: (v: View) => void; open: boolean; close: () => void }) {
-  return <>{open && <button aria-label="Close menu" onClick={close} className="fixed inset-0 z-40 bg-black/25 lg:hidden"/>}<aside className={`fixed inset-y-0 left-0 z-50 flex w-[248px] flex-col border-r border-[#e4e8e6] bg-white px-4 py-5 transition-transform lg:translate-x-0 ${open ? "translate-x-0" : "-translate-x-full"}`}><div className="px-2 pb-8"><Logo/></div><nav className="space-y-1.5">{navItems.map((item) => { const Icon = item.icon; return <button key={item.id} onClick={() => { setView(item.id); close(); }} className={`flex w-full items-center gap-3 rounded-xl px-3 py-2.5 text-left text-[14px] font-medium transition ${view === item.id ? "bg-[#eef6f1] text-[#1f4739]" : "text-[#68736e] hover:bg-[#f7f8f7] hover:text-[#27332e]"}`}><Icon size={18} strokeWidth={view === item.id ? 2.3 : 1.8}/>{item.label}{item.id === "feed" && <span className="ml-auto rounded-full bg-[#d8f26a] px-2 py-0.5 text-[11px] font-bold text-[#294134]">9</span>}</button>; })}</nav><div className="mt-auto rounded-2xl border border-[#dfe8e3] bg-[#f4f8f6] p-3.5"><div className="mb-2 flex items-center gap-2 text-[13px] font-semibold"><Lightbulb size={16} className="text-[#567a69]"/>Focus saved today</div><div className="text-2xl font-bold tracking-tight text-[#1f4739]">58 min</div><div className="mt-1 text-[12px] leading-5 text-[#78837e]">42 duplicates and 96 distractions quietly handled.</div></div><button className="mt-3 flex items-center gap-3 rounded-xl px-2 py-2 text-left"><span className="grid h-9 w-9 place-items-center rounded-full bg-[#dff0e7] text-sm font-bold text-[#1f4739]">B</span><span className="min-w-0"><span className="block truncate text-sm font-semibold">Binod</span><span className="block text-xs text-[#89928e]">Demo workspace</span></span><ChevronDown size={15} className="ml-auto text-[#89928e]"/></button></aside></>;
+function displayTitle(item: ScoredContentItem) {
+  return item.analysis.catchyTitle?.trim() || item.title;
 }
-function Header({ setMenu, query, setQuery }: { setMenu: () => void; query: string; setQuery: (q: string) => void }) {
+
+function EmptyState({ title, text }: { title: string; text: string }) {
+  return <div className={`${panel} grid min-h-64 place-items-center border-dashed px-6 text-center`}><div><Sparkles className="mx-auto text-[var(--accent)]" size={22} /><h3 className="mt-4 font-semibold">{title}</h3><p className="mt-2 max-w-md text-sm text-[var(--muted)]">{text}</p></div></div>;
+}
+
+function FeedCard({ item, saved, nowIso, onSave, onRead, onHide }: {
+  item: ScoredContentItem; saved: boolean; nowIso: string;
+  onSave: () => void; onRead: () => void; onHide: () => void;
+}) {
+  const tone = priorityTone[item.priority];
+  const hasAiHeadline = displayTitle(item) !== item.title;
+  return (
+    <article className={`${panel} group relative flex min-h-72 flex-col overflow-hidden border-t-2 ${tone.border} p-4 transition hover:-translate-y-1 hover:shadow-[var(--shadow-glow)]`}>
+      <div className="flex items-center gap-2 font-mono text-[10px] uppercase tracking-[0.1em] text-[var(--muted)]"><span className={`h-2 w-2 rounded-full ${tone.soft}`} /><span className="truncate">{item.source}</span><span className="ml-auto shrink-0">{relativeTime(item.publishedAt, nowIso)}</span></div>
+      <div className="mt-4 flex items-start gap-3"><div className="min-w-0 flex-1">{hasAiHeadline ? <div className="mb-1.5 flex items-center gap-1 font-mono text-[9px] uppercase text-[var(--accent)]"><Sparkles size={10} />AI refined</div> : null}<h3 title={item.title} className="line-clamp-3 text-base font-semibold leading-6 tracking-[-0.02em]">{displayTitle(item)}</h3></div><span className={`grid h-10 w-10 shrink-0 place-items-center rounded-full border ${tone.border} ${tone.text} font-mono text-xs font-bold`}>{item.score}</span></div>
+      <p className="mt-3 line-clamp-3 text-xs leading-5 text-[var(--muted)]">{item.analysis.summary}</p>
+      <div className="mt-3 flex flex-wrap gap-1.5"><span className={`rounded-full border ${tone.border} ${tone.text} px-2 py-1 text-[9px] font-bold uppercase`}>{tone.label}</span><span className="rounded-full border border-[var(--border)] px-2 py-1 text-[9px] text-[var(--muted)]">{item.analysis.category}</span></div>
+      {item.reasons[0] ? <div className="mt-3 border-l-2 border-[var(--accent)] pl-3 text-[11px] leading-5 text-[var(--muted)]">{item.reasons[0]}</div> : null}
+      <div className="mt-auto flex items-center gap-1 border-t border-[var(--border)] pt-3"><button onClick={onSave} aria-label={saved ? "Remove bookmark" : "Bookmark"} className="icon-button">{saved ? <BookmarkCheck size={15} /> : <Bookmark size={15} />}</button><button onClick={onRead} aria-label="Mark read" className="icon-button"><Check size={16} /></button><button onClick={onHide} aria-label="Hide item" className="icon-button"><EyeOff size={15} /></button>{item.originalUrl ? <a href={item.originalUrl} target="_blank" rel="noreferrer" onClick={onRead} className="ml-auto flex h-8 items-center gap-1 rounded-[calc(var(--radius)/2)] border border-[var(--accent)] px-2.5 text-[10px] font-semibold text-[var(--accent)] hover:bg-[var(--accent-soft)]">Open <ExternalLink size={11} /></a> : null}</div>
+    </article>
+  );
+}
+
+function ProjectForm({ onCreated }: { onCreated: (project: Project) => void }) {
+  const [form, setForm] = useState({ title: "", details: "", priority: "medium" as Priority, deadline: "" });
+  const [saving, setSaving] = useState(false);
+  const [message, setMessage] = useState("");
+
+  async function submit(event: React.FormEvent) {
+    event.preventDefault();
+    if (!form.title.trim()) return;
+    setSaving(true); setMessage("");
+    const supabase = createClient();
+    if (!supabase) { setMessage("The database is not configured; add Supabase credentials and try again."); setSaving(false); return; }
+    const { data: auth } = await supabase.auth.getUser();
+    if (!auth.user) { setMessage("Your session expired; sign in again and retry."); setSaving(false); return; }
+    const { data, error } = await supabase.from("user_projects").insert({
+      user_id: auth.user.id,
+      title: form.title.trim(),
+      details: form.details.trim(),
+      priority: form.priority,
+      deadline: form.deadline ? new Date(form.deadline).toISOString() : null,
+    }).select("id,title,details,priority,deadline,status,created_at").single();
+    setSaving(false);
+    if (error || !data) { setMessage(error?.message || "The project could not be saved; try again."); return; }
+    onCreated(data);
+    setForm({ title: "", details: "", priority: "medium", deadline: "" });
+    setMessage("Project added to your attention queue.");
+  }
+
+  return <form onSubmit={submit} className={`${panel} p-5`}><div className="flex items-center gap-2"><Plus className="text-[var(--accent)]" size={17} /><h2 className="font-semibold">Add a project</h2></div><div className="mt-5 grid gap-4"><label className="field-label">Project title<input required maxLength={160} value={form.title} onChange={(event) => setForm((current) => ({ ...current, title: event.target.value }))} placeholder="e.g. Semester portfolio" className="field-control" /></label><label className="field-label">Details<textarea maxLength={5000} rows={5} value={form.details} onChange={(event) => setForm((current) => ({ ...current, details: event.target.value }))} placeholder="Goals, links, people involved, and the next step" className="field-control resize-y" /></label><div className="grid gap-4 sm:grid-cols-2"><label className="field-label">Priority<select value={form.priority} onChange={(event) => setForm((current) => ({ ...current, priority: event.target.value as Priority }))} className="field-control"><option value="high">High</option><option value="medium">Medium</option><option value="low">Low</option></select></label><label className="field-label">Deadline<input type="datetime-local" value={form.deadline} onChange={(event) => setForm((current) => ({ ...current, deadline: event.target.value }))} className="field-control font-mono" /></label></div></div>{message ? <p role="status" className="mt-4 text-xs text-[var(--accent)]">{message}</p> : null}<button disabled={saving} className="mt-5 flex h-10 w-full items-center justify-center gap-2 rounded-[calc(var(--radius)/2)] bg-[var(--accent)] px-4 text-xs font-bold text-[var(--accent-contrast)] disabled:opacity-60">{saving ? <Loader2 className="animate-spin" size={15} /> : <Plus size={15} />}{saving ? "Saving…" : "Add project"}</button></form>;
+}
+
+function ProjectsView({ initialProjects }: { initialProjects: Project[] }) {
+  const [projects, setProjects] = useState(initialProjects);
+  const [error, setError] = useState("");
+
+  async function updateStatus(project: Project) {
+    const supabase = createClient();
+    if (!supabase) return;
+    const status = project.status === "completed" ? "active" : "completed";
+    const { error: updateError } = await supabase.from("user_projects").update({ status }).eq("id", project.id);
+    if (updateError) { setError(updateError.message); return; }
+    setProjects((current) => current.map((value) => value.id === project.id ? { ...value, status } : value));
+  }
+
+  async function remove(project: Project) {
+    const supabase = createClient();
+    if (!supabase) return;
+    const { error: deleteError } = await supabase.from("user_projects").delete().eq("id", project.id);
+    if (deleteError) { setError(deleteError.message); return; }
+    setProjects((current) => current.filter((value) => value.id !== project.id));
+  }
+
+  return <div><PageHeading eyebrow="Your input" title="Projects & deadlines" subtitle="Add the work that matters to you. It stays private to your account and sits beside your ranked feed." />{error ? <div role="alert" className="mb-4 rounded-[calc(var(--radius)/2)] border border-[var(--critical)] bg-[var(--critical-soft)] p-3 text-xs text-[var(--critical)]">{error}</div> : null}<div className="grid gap-4 xl:grid-cols-[minmax(19rem,26rem)_1fr]"><ProjectForm onCreated={(project) => setProjects((current) => [project, ...current])} /><section className={`${panel} p-5`}><div className="flex items-center justify-between"><h2 className="font-semibold">Your queue</h2><span className="font-mono text-[10px] text-[var(--muted)]">{projects.length} projects</span></div>{projects.length ? <div className="mt-4 grid gap-3 md:grid-cols-2">{projects.map((project) => { const tone = priorityTone[project.priority]; return <article key={project.id} className={`rounded-[calc(var(--radius)/1.4)] border ${tone.border} bg-[var(--panel-strong)] p-4 ${project.status === "completed" ? "opacity-55" : ""}`}><div className="flex items-start gap-3"><button onClick={() => void updateStatus(project)} aria-label={project.status === "completed" ? `Mark ${project.title} active` : `Complete ${project.title}`} className={`icon-button shrink-0 ${project.status === "completed" ? "text-[var(--ok)]" : ""}`}>{project.status === "completed" ? <CheckCircle2 size={16} /> : <CircleGauge size={16} />}</button><div className="min-w-0 flex-1"><h3 className="font-semibold">{project.title}</h3><span className={`mt-1 inline-block font-mono text-[9px] uppercase ${tone.text}`}>{project.priority}</span></div><button onClick={() => void remove(project)} aria-label={`Delete ${project.title}`} className="icon-button text-[var(--critical)]"><Trash2 size={14} /></button></div>{project.details ? <p className="mt-3 whitespace-pre-wrap text-xs leading-5 text-[var(--muted)]">{project.details}</p> : null}{project.deadline ? <div className="mt-4 flex items-center gap-2 border-t border-[var(--border)] pt-3 font-mono text-[10px] text-[var(--warn)]"><CalendarClock size={13} />{new Date(project.deadline).toLocaleString("en-IN", { dateStyle: "medium", timeStyle: "short" })}</div> : null}</article>; })}</div> : <p className="mt-8 text-sm text-[var(--muted)]">No projects yet. Add the first one using the form.</p>}</section></div></div>;
+}
+
+function PageHeading({ eyebrow, title, subtitle }: { eyebrow: string; title: string; subtitle: string }) {
+  return <div className="mb-6"><div className="font-mono text-[10px] uppercase tracking-[0.14em] text-[var(--accent)]">{eyebrow}</div><h1 className="mt-2 text-3xl font-semibold tracking-[-0.045em]">{title}</h1><p className="mt-2 max-w-2xl text-sm text-[var(--muted)]">{subtitle}</p></div>;
+}
+
+function ProfileView({ name, email, interests, onNameChange, onLogout }: { name: string; email: string; interests: Interest[]; onNameChange: (name: string) => void; onLogout: () => void }) {
+  const [nextName, setNextName] = useState(name);
+  const [saving, setSaving] = useState(false);
+  const [message, setMessage] = useState("");
+
+  async function save(event: React.FormEvent) {
+    event.preventDefault();
+    const cleanName = nextName.trim();
+    if (cleanName.length < 2) { setMessage("Enter at least two characters for your display name."); return; }
+    const supabase = createClient();
+    if (!supabase) { setMessage("The database is not configured; add Supabase credentials and try again."); return; }
+    setSaving(true); setMessage("");
+    const { data } = await supabase.auth.getUser();
+    if (!data.user) { setSaving(false); setMessage("Your session expired; sign in again and retry."); return; }
+    const { error } = await supabase.from("profiles").update({ display_name: cleanName }).eq("id", data.user.id);
+    setSaving(false);
+    if (error) { setMessage(error.message); return; }
+    onNameChange(cleanName);
+    setMessage("Profile updated.");
+  }
+
+  return <div><PageHeading eyebrow="Account" title="Profile" subtitle="Manage the identity and attention signals used by your workspace." /><div className="grid gap-4 xl:grid-cols-[minmax(0,1fr)_22rem]"><form onSubmit={save} className={`${panel} p-5`}><div className="flex items-center gap-3"><span className="grid h-12 w-12 place-items-center rounded-full border border-[var(--accent)] bg-[var(--accent-soft)] text-lg font-semibold text-[var(--accent)]">{name.slice(0, 1).toUpperCase()}</span><div><h2 className="font-semibold">Personal details</h2><p className="mt-1 text-xs text-[var(--muted)]">Used for greetings and your private workspace.</p></div></div><div className="mt-6 grid gap-4"><label className="field-label">Display name<input value={nextName} onChange={(event) => setNextName(event.target.value)} maxLength={80} className="field-control" /></label><label className="field-label">Email<input value={email} readOnly className="field-control opacity-70" /></label></div>{message ? <p role="status" className="mt-4 text-xs text-[var(--accent)]">{message}</p> : null}<button disabled={saving} className="mt-5 flex h-10 items-center justify-center gap-2 rounded-[calc(var(--radius)/2)] bg-[var(--accent)] px-4 text-xs font-bold text-[var(--accent-contrast)] disabled:opacity-60">{saving ? <Loader2 size={14} className="animate-spin" /> : <Check size={14} />}{saving ? "Saving…" : "Save profile"}</button></form><aside className={`${panel} p-5`}><h2 className="font-semibold">Attention profile</h2><p className="mt-2 text-xs leading-5 text-[var(--muted)]">Your saved interests shape every relevance score.</p><div className="mt-4 flex flex-wrap gap-2">{interests.length ? interests.map((interest) => <span key={interest.topic} className="rounded-full border border-[var(--border)] bg-[var(--panel-strong)] px-2.5 py-1.5 text-[10px]"><span className="font-medium">{interest.topic}</span><span className="ml-1 text-[var(--muted)]">· {interest.priority}</span></span>) : <span className="text-xs text-[var(--muted)]">No interests saved yet.</span>}</div><button type="button" onClick={onLogout} className="mt-8 flex h-10 w-full items-center justify-center gap-2 rounded-[calc(var(--radius)/2)] border border-[var(--critical)] text-xs font-semibold text-[var(--critical)] hover:bg-[var(--critical-soft)]"><LogOut size={14} />Log out</button></aside></div></div>;
+}
+
+export function DashboardClient(props: DashboardProps) {
+  const router = useRouter();
+  const autoRefreshed = useRef(false);
+  const [view, setView] = useState<View>("overview");
+  const [displayName, setDisplayName] = useState(props.userName);
+  const [menuOpen, setMenuOpen] = useState(false);
+  const [query, setQuery] = useState("");
+  const [sourceFilter, setSourceFilter] = useState("all");
+  const [categoryFilter, setCategoryFilter] = useState("all");
+  const [priorityFilter, setPriorityFilter] = useState("all");
+  const [visibleCount, setVisibleCount] = useState(PAGE_SIZE);
+  const [saved, setSaved] = useState(() => new Set(props.initialSavedItemIds));
+  const [read, setRead] = useState(() => new Set(props.initialReadItemIds));
+  const [hidden, setHidden] = useState(() => new Set(props.initialHiddenItemIds));
   const [refreshing, setRefreshing] = useState(false);
-  const router=useRouter();
-  return <header className="sticky top-0 z-30 flex h-[72px] items-center gap-3 border-b border-[#e6eae8] bg-white/90 px-4 backdrop-blur-xl sm:px-7"><button className="grid h-10 w-10 place-items-center rounded-xl border border-[#e2e7e4] lg:hidden" onClick={setMenu}><Menu size={19}/></button><div className="relative max-w-xl flex-1"><Search size={17} className="absolute left-3.5 top-1/2 -translate-y-1/2 text-[#87918c]"/><input value={query} onChange={(e) => setQuery(e.target.value)} placeholder="Search titles, topics, people, sources..." className="h-11 w-full rounded-xl border border-[#dfe5e2] bg-[#f8faf9] pl-10 pr-4 text-sm outline-none transition focus:border-[#91ad9f] focus:bg-white focus:ring-4 focus:ring-[#dfece5]/70"/></div><div className="ml-auto flex items-center gap-2"><button onClick={() => { setRefreshing(true); setTimeout(() => setRefreshing(false), 900); }} className="hidden h-10 items-center gap-2 rounded-xl border border-[#e0e5e2] px-3 text-sm font-medium text-[#57615d] hover:bg-[#f8faf9] sm:flex"><RefreshCw size={16} className={refreshing ? "animate-spin" : ""}/>{refreshing ? "Refreshing" : "Refresh"}</button><button aria-label="Notifications" className="relative grid h-10 w-10 place-items-center rounded-xl border border-[#e0e5e2] text-[#59645f]"><Bell size={17}/><span className="absolute right-2 top-2 h-2 w-2 rounded-full border-2 border-white bg-[#d35b4f]"/></button><button title="Sign out" onClick={async()=>{await createClient()?.auth.signOut();router.push("/login")}} aria-label="Sign out" className="grid h-10 w-10 place-items-center rounded-xl bg-[#1f4739] text-sm font-bold text-white">B</button></div></header>;
+  const [refreshMessage, setRefreshMessage] = useState("");
+
+  const refresh = useCallback(async () => {
+    setRefreshing(true); setRefreshMessage("");
+    try {
+      const response = await fetch("/api/content", { method: "POST" });
+      const result = await response.json() as { created?: number; warnings?: string[]; error?: string };
+      if (!response.ok) throw new Error(result.error || result.warnings?.[0] || "Source refresh failed.");
+      setRefreshMessage(result.created ? `${result.created} new updates added.` : "Sources are synced; there are no new updates.");
+      router.refresh();
+    } catch (error) {
+      setRefreshMessage(error instanceof Error ? error.message : "Sources could not refresh; check the server configuration.");
+    } finally { setRefreshing(false); }
+  }, [router]);
+
+  useEffect(() => {
+    if (autoRefreshed.current) return;
+    autoRefreshed.current = true;
+    void refresh();
+  }, [refresh]);
+
+  const unreadItems = useMemo(() => props.initialItems.filter((item) => !read.has(item.id) && !hidden.has(item.id)), [hidden, props.initialItems, read]);
+  const sources = useMemo(() => [...new Set(unreadItems.map((item) => item.source))].sort(), [unreadItems]);
+  const categories = useMemo(() => [...new Set(unreadItems.map((item) => item.analysis.category))].sort(), [unreadItems]);
+  const filtered = useMemo(() => unreadItems.filter((item) => {
+    const text = `${displayTitle(item)} ${item.title} ${item.analysis.summary} ${item.source}`.toLowerCase();
+    return (!query || text.includes(query.toLowerCase())) && (sourceFilter === "all" || item.source === sourceFilter) && (categoryFilter === "all" || item.analysis.category === categoryFilter) && (priorityFilter === "all" || item.priority === priorityFilter);
+  }), [categoryFilter, priorityFilter, query, sourceFilter, unreadItems]);
+
+  const mutateRead = useCallback(async (id: string, kind: "read" | "hidden") => {
+    if (kind === "read") setRead((current) => new Set(current).add(id)); else setHidden((current) => new Set(current).add(id));
+    const supabase = createClient(); if (!supabase) return;
+    const { data } = await supabase.auth.getUser(); if (!data.user) return;
+    const timestamp = new Date().toISOString();
+    const payload: Database["public"]["Tables"]["read_status"]["Insert"] = kind === "read"
+      ? { user_id: data.user.id, content_item_id: id, read_at: timestamp }
+      : { user_id: data.user.id, content_item_id: id, hidden_at: timestamp };
+    await supabase.from("read_status").upsert(payload, { onConflict: "user_id,content_item_id" });
+  }, []);
+
+  const toggleSaved = useCallback(async (id: string) => {
+    const shouldSave = !saved.has(id);
+    setSaved((current) => { const next = new Set(current); if (shouldSave) next.add(id); else next.delete(id); return next; });
+    const supabase = createClient(); if (!supabase) return;
+    const { data } = await supabase.auth.getUser(); if (!data.user) return;
+    if (shouldSave) await supabase.from("bookmarks").insert({ user_id: data.user.id, content_item_id: id });
+    else await supabase.from("bookmarks").delete().eq("user_id", data.user.id).eq("content_item_id", id);
+  }, [saved]);
+
+  const logout = useCallback(async () => {
+    const supabase = createClient();
+    if (supabase) await supabase.auth.signOut({ scope: "local" });
+    router.push("/login");
+    router.refresh();
+  }, [router]);
+
+  const feed = <div><PageHeading eyebrow={props.currentDate} title={`${props.greeting}, ${props.userName}.`} subtitle="Real updates, ranked against the interests and priorities saved in your profile." /><div className={`${panel} mb-5 flex flex-wrap items-center gap-2 p-3`}><ListFilter size={15} className="text-[var(--accent)]" /><select aria-label="Filter by source" value={sourceFilter} onChange={(event) => { setSourceFilter(event.target.value); setVisibleCount(PAGE_SIZE); }} className="filter-control"><option value="all">All sources</option>{sources.map((source) => <option key={source}>{source}</option>)}</select><select aria-label="Filter by category" value={categoryFilter} onChange={(event) => { setCategoryFilter(event.target.value); setVisibleCount(PAGE_SIZE); }} className="filter-control"><option value="all">All categories</option>{categories.map((category) => <option key={category}>{category}</option>)}</select><select aria-label="Filter by priority" value={priorityFilter} onChange={(event) => { setPriorityFilter(event.target.value); setVisibleCount(PAGE_SIZE); }} className="filter-control"><option value="all">All priorities</option><option value="critical">Must see</option><option value="high">High</option><option value="medium">Medium</option><option value="low">Low</option></select><span className="ml-auto font-mono text-[10px] text-[var(--muted)]">{filtered.length} unread</span></div>{filtered.length ? <><div className="grid gap-5 sm:grid-cols-2">{filtered.slice(0, visibleCount).map((item) => <FeedCard key={item.id} item={item} saved={saved.has(item.id)} nowIso={props.nowIso} onSave={() => void toggleSaved(item.id)} onRead={() => void mutateRead(item.id, "read")} onHide={() => void mutateRead(item.id, "hidden")} />)}</div>{visibleCount < filtered.length ? <button onClick={() => setVisibleCount((count) => count + PAGE_SIZE)} className="mx-auto mt-7 flex h-10 items-center gap-2 rounded-[calc(var(--radius)/2)] border border-[var(--accent)] px-5 text-xs font-semibold text-[var(--accent)] hover:bg-[var(--accent-soft)]">Load more <ChevronRight size={14} /></button> : null}</> : <EmptyState title={query || sourceFilter !== "all" || categoryFilter !== "all" || priorityFilter !== "all" ? "No matching information" : "Nothing needs action"} text={query ? "Try another search or clear a filter." : "Check back after the next source sync."} />}</div>;
+
+  const savedView = <div><PageHeading eyebrow="Reading list" title="Saved updates" subtitle="Only items you bookmarked from your real feed appear here." />{props.initialItems.filter((item) => saved.has(item.id)).length ? <div className="grid gap-4 sm:grid-cols-2 xl:grid-cols-3 2xl:grid-cols-4">{props.initialItems.filter((item) => saved.has(item.id)).map((item) => <FeedCard key={item.id} item={item} saved nowIso={props.nowIso} onSave={() => void toggleSaved(item.id)} onRead={() => void mutateRead(item.id, "read")} onHide={() => void mutateRead(item.id, "hidden")} />)}</div> : <EmptyState title="Your reading list is empty" text="Bookmark a feed card and it will appear here." />}</div>;
+  const priorityView = <div><PageHeading eyebrow="Personal signals" title="Your priorities" subtitle="These values come from your onboarding profile and directly influence every score." />{props.interests.length ? <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-3">{props.interests.map((interest) => { const tone = priorityTone[interest.priority]; return <div key={interest.topic} className={`${panel} border-l-2 ${tone.border} p-5`}><div className="text-lg font-semibold">{interest.topic}</div><div className={`mt-2 font-mono text-[10px] uppercase ${tone.text}`}>{interest.priority} priority</div></div>; })}</div> : <EmptyState title="No priorities saved" text="Complete onboarding to personalize your ranking." />}</div>;
+  const insightsView = <div><PageHeading eyebrow="Live account data" title="Attention insights" subtitle="Calculated from the information currently stored for your account." /><div className="grid gap-4 sm:grid-cols-3">{[{ label: "Updates", value: props.initialItems.length }, { label: "Must see", value: props.initialItems.filter((item) => item.priority === "critical").length }, { label: "Saved", value: saved.size }].map((metric) => <div key={metric.label} className={`${panel} p-5`}><div className="font-mono text-[10px] uppercase text-[var(--muted)]">{metric.label}</div><div className="mt-3 text-4xl font-semibold text-[var(--accent)]">{metric.value}</div></div>)}</div></div>;
+  const sourceView = <div><PageHeading eyebrow="Server status" title="Information sources" subtitle="Configuration is read from the running server; unavailable integrations are labelled honestly." /><div className="grid gap-3 md:grid-cols-2">{props.sourceStatuses.map((source) => <div key={source.name} className={`${panel} flex items-center gap-4 p-4`}><div className="grid h-10 w-10 place-items-center rounded-full border border-[var(--border)] text-[var(--accent)]"><Rss size={17} /></div><div className="min-w-0"><div className="font-semibold">{source.name}</div><div className="mt-1 text-xs text-[var(--muted)]">{source.description}</div></div><span className={`ml-auto h-2.5 w-2.5 rounded-full ${source.configured ? "bg-[var(--ok)]" : "bg-[var(--warn)]"}`} aria-label={source.configured ? "Configured" : "Not configured"} /></div>)}</div></div>;
+
+  const nav = [
+    { id: "overview" as const, label: "Overview", icon: LayoutDashboard },
+    { id: "feed" as const, label: "Smart feed", icon: Inbox },
+    { id: "projects" as const, label: "Projects", icon: FolderKanban },
+    { id: "priorities" as const, label: "Priorities", icon: Flame },
+    { id: "saved" as const, label: "Saved", icon: Bookmark },
+    { id: "insights" as const, label: "Insights", icon: CircleGauge },
+    { id: "sources" as const, label: "Sources", icon: Rss },
+    { id: "profile" as const, label: "Profile", icon: UserRound },
+  ];
+  const content = view === "overview"
+    ? <AttentionOverview items={unreadItems} projects={props.initialProjects} />
+    : view === "feed"
+      ? feed
+      : view === "projects"
+        ? <ProjectsView initialProjects={props.initialProjects} />
+        : view === "priorities"
+          ? priorityView
+          : view === "saved"
+            ? savedView
+            : view === "insights"
+              ? insightsView
+              : view === "sources"
+                ? sourceView
+                : <ProfileView name={displayName} email={props.userEmail} interests={props.interests} onNameChange={setDisplayName} onLogout={() => void logout()} />;
+
+  return (
+    <main className="min-h-screen bg-[var(--bg)] text-[var(--text)]">
+      <button aria-label="Close navigation" onClick={() => setMenuOpen(false)} className={`fixed inset-0 z-40 bg-[var(--overlay)] lg:hidden ${menuOpen ? "block" : "hidden"}`} />
+      <aside className={`fixed inset-y-0 left-0 z-50 flex w-64 flex-col border-r border-[var(--border)] bg-[var(--panel)] p-4 transition-transform lg:translate-x-0 ${menuOpen ? "translate-x-0" : "-translate-x-full"}`}>
+        <div className="flex h-14 items-center gap-3 px-2"><div className="grid h-9 w-9 place-items-center rounded-full border border-[var(--accent)] text-[var(--accent)] shadow-[var(--shadow-glow)]"><Sparkles size={16} /></div><div><div className="font-semibold tracking-[-0.03em]">focus-flow</div><div className="font-mono text-[9px] uppercase text-[var(--muted)]">attention system</div></div><button aria-label="Close navigation" onClick={() => setMenuOpen(false)} className="icon-button ml-auto lg:hidden"><X size={15} /></button></div>
+        <nav className="mt-7 space-y-1">{nav.map((item) => { const Icon = item.icon; return <button key={item.id} onClick={() => { setView(item.id); setMenuOpen(false); }} className={`flex w-full items-center gap-3 rounded-[calc(var(--radius)/2)] px-3 py-2.5 text-left text-xs font-medium ${view === item.id ? "bg-[var(--accent-soft)] text-[var(--accent)]" : "text-[var(--muted)] hover:bg-[var(--panel-strong)] hover:text-[var(--text)]"}`}><Icon size={16} />{item.label}{item.id === "feed" ? <span className="ml-auto font-mono text-[9px]">{unreadItems.length}</span> : null}</button>; })}</nav>
+        <div className="mt-auto border-t border-[var(--border)] pt-4"><button onClick={() => setView("profile")} className="flex w-full items-center gap-3 rounded-[calc(var(--radius)/2)] p-2 text-left hover:bg-[var(--panel-strong)]"><span className="grid h-9 w-9 place-items-center rounded-full border border-[var(--accent)] bg-[var(--accent-soft)] text-xs font-semibold text-[var(--accent)]">{displayName.slice(0, 1).toUpperCase()}</span><span className="min-w-0 flex-1"><span className="block truncate text-xs font-semibold">{displayName}</span><span className="mt-1 block text-[10px] text-[var(--muted)]">View profile</span></span><ChevronRight size={13} className="text-[var(--muted)]" /></button><button onClick={() => void logout()} className="mt-2 flex w-full items-center gap-2 px-3 py-2 text-[10px] text-[var(--critical)]"><LogOut size={13} />Log out</button></div>
+      </aside>
+      <div className="lg:pl-64">
+        <header className="sticky top-0 z-30 flex min-h-16 items-center gap-2 border-b border-[var(--border)] bg-[var(--panel-translucent)] px-3 backdrop-blur-xl sm:px-6"><button aria-label="Open navigation" onClick={() => setMenuOpen(true)} className="icon-button lg:hidden"><Menu size={17} /></button><div className="relative min-w-0 flex-1 sm:max-w-xl"><Search size={15} className="absolute left-3 top-1/2 -translate-y-1/2 text-[var(--muted)]" /><input value={query} onChange={(event) => { setQuery(event.target.value); setView("feed"); setVisibleCount(PAGE_SIZE); }} placeholder="Search your information" className="h-10 w-full rounded-[calc(var(--radius)/2)] border border-[var(--border)] bg-[var(--panel-strong)] pl-9 pr-3 text-xs outline-none focus:border-[var(--accent)]" /></div><button onClick={() => void refresh()} disabled={refreshing} className="flex h-10 items-center gap-2 rounded-[calc(var(--radius)/2)] border border-[var(--border)] px-3 text-[10px] font-semibold text-[var(--muted)] hover:border-[var(--accent)] hover:text-[var(--accent)] disabled:opacity-50"><RefreshCw size={14} className={refreshing ? "animate-spin" : ""} /><span className="hidden sm:inline">{refreshing ? "Syncing" : "Sync now"}</span></button><ThemeToggle /><button aria-label="Notifications" className="icon-button"><Bell size={15} /></button></header>
+        <div className="mx-auto max-w-[1560px] px-3 py-6 sm:px-6 lg:px-8">{refreshMessage ? <div role="status" className={`${panel} mb-4 px-4 py-3 text-xs text-[var(--accent)]`}>{refreshMessage}</div> : null}{content}</div>
+      </div>
+    </main>
+  );
 }
-function ScoreRing({ score }: { score: number }) { const tone = score >= 90 ? "#c94c41" : score >= 75 ? "#d28a21" : score >= 50 ? "#4b86ad" : "#82908a"; return <div className="relative grid h-14 w-14 shrink-0 place-items-center rounded-full" style={{ background: `conic-gradient(${tone} ${score * 3.6}deg, #edf0ef 0)` }}><div className="grid h-[46px] w-[46px] place-items-center rounded-full bg-white"><span className="text-[15px] font-bold" style={{ color: tone }}>{score}</span></div></div>; }
-
-function FeedCard({ item, saved, read, onSave, onRead, onHide }: { item: ScoredContentItem; saved: boolean; read: boolean; onSave: () => void; onRead: () => void; onHide: () => void }) {
-  const Icon = sourceIcons[item.sourceType] ?? Newspaper;
-  return <article className={`animate-fade-up rounded-2xl border bg-white p-5 card-shadow transition hover:-translate-y-0.5 hover:shadow-[0_15px_36px_rgba(23,32,29,.08)] sm:p-6 ${read ? "border-[#e8ecea] opacity-70" : "border-[#e0e5e2]"}`}><div className="flex gap-4"><div className="min-w-0 flex-1"><div className="mb-3 flex flex-wrap items-center gap-2 text-[12px] text-[#7c8782]"><span className="grid h-7 w-7 place-items-center rounded-lg bg-[#edf4f0] text-[#315847]"><Icon size={14}/></span><span className="font-semibold text-[#50605a]">{item.source}</span><span>•</span><span>{relativeTime(item.publishedAt)}</span><span className="rounded-md bg-[#f3f5f4] px-2 py-1 font-medium text-[#69746f]">{item.analysis.category}</span></div><h3 className="text-[19px] font-semibold leading-[1.38] tracking-[-.022em] text-[#202b27] sm:text-[21px]">{item.title}</h3><p className="mt-2.5 text-[14px] leading-6 text-[#66716c]">{item.analysis.summary}</p></div><ScoreRing score={item.score}/></div><div className="mt-4 rounded-xl border border-[#e2ebe6] bg-[#f5f9f7] px-4 py-3"><div className="mb-2 flex items-center gap-2 text-[12px] font-bold uppercase tracking-[.08em] text-[#3f6857]"><Sparkles size={14}/>Why this matters to you</div><div className="flex flex-wrap gap-x-5 gap-y-1.5">{item.reasons.slice(0,3).map((reason) => <span key={reason} className="flex items-center gap-1.5 text-[13px] text-[#5f6d67]"><Check size={13} className="text-[#4d826b]"/>{reason}</span>)}</div></div><div className="mt-4 flex flex-wrap items-center gap-2 border-t border-[#edf0ef] pt-4"><span className={`rounded-full border px-2.5 py-1 text-[11px] font-bold uppercase tracking-[.06em] ${priorityStyles[item.priority]}`}>{item.priority === "critical" ? "Must see" : item.priority}</span>{!!item.relatedSources && <span className="flex items-center gap-1.5 rounded-full bg-[#f1f4f3] px-2.5 py-1 text-[12px] font-medium text-[#68736e]"><Layers3 size={13}/>{item.relatedSources} sources</span>}<div className="ml-auto flex items-center gap-1"><button onClick={onSave} aria-label="Bookmark" className={`grid h-9 w-9 place-items-center rounded-lg hover:bg-[#f3f6f4] ${saved ? "text-[#1f6b4c]" : "text-[#78837e]"}`}>{saved ? <BookmarkCheck size={17}/> : <Bookmark size={17}/>}</button><button onClick={onRead} aria-label="Mark read" className={`grid h-9 w-9 place-items-center rounded-lg hover:bg-[#f3f6f4] ${read ? "text-[#1f6b4c]" : "text-[#78837e]"}`}><Check size={18}/></button><button onClick={onHide} aria-label="Hide" className="grid h-9 w-9 place-items-center rounded-lg text-[#78837e] hover:bg-[#f3f6f4]"><EyeOff size={17}/></button><a href={item.originalUrl} target="_blank" rel="noreferrer" className="ml-1 flex h-9 items-center gap-1.5 rounded-lg border border-[#dee4e1] px-3 text-[12px] font-semibold text-[#42534b] hover:bg-[#f6f8f7]">View original<ExternalLink size={13}/></a></div></div></article>;
-}
-function SectionHeader({ tone, title, count, subtitle }: { tone: "red"|"yellow"|"gray"; title: string; count: number; subtitle: string }) { const colors={red:"bg-[#dd5d51]",yellow:"bg-[#e9ac45]",gray:"bg-[#98a19d]"}; return <div className="mb-3 mt-7"><div className="flex items-center gap-2"><span className={`h-2.5 w-2.5 rounded-full ${colors[tone]}`}/><h2 className="text-[14px] font-bold uppercase tracking-[.08em] text-[#36443e]">{title}</h2><span className="rounded-full bg-white px-2 py-0.5 text-xs font-semibold text-[#78837e]">{count}</span></div><p className="ml-[18px] mt-1 text-[12px] text-[#87908c]">{subtitle}</p></div>; }
-
-function SmartFeed({ items, query, saved, read, setSaved, setRead, hidden, setHidden, openDigest }: { items: ScoredContentItem[]; query:string; saved:Set<string>; read:Set<string>; setSaved:(s:Set<string>)=>void; setRead:(s:Set<string>)=>void; hidden:Set<string>; setHidden:(s:Set<string>)=>void; openDigest:()=>void }) {
-  const filtered=items.filter(i=>!hidden.has(i.id)&&`${i.title} ${i.analysis.summary} ${i.source} ${i.analysis.category}`.toLowerCase().includes(query.toLowerCase()));
-  const groups=[{title:"Must see",tone:"red" as const,subtitle:"Time-sensitive and closely matched to your priorities",items:filtered.filter(i=>i.score>=75)},{title:"Worth reading",tone:"yellow" as const,subtitle:"Relevant updates that deserve a little attention",items:filtered.filter(i=>i.score>=50&&i.score<75)},{title:"Later",tone:"gray" as const,subtitle:"Useful context, batched so it never interrupts you",items:filtered.filter(i=>i.score<50)}];
-  const toggle=(set:Set<string>,id:string)=>{const n=new Set(set);if(n.has(id))n.delete(id);else n.add(id);return n};
-  return <div><div className="mb-7 flex flex-col gap-4 sm:flex-row sm:items-end sm:justify-between"><div><p className="mb-1 text-[13px] font-medium text-[#718078]">Thursday, 1 October</p><h1 className="text-3xl font-bold tracking-[-.045em] text-[#17201d] sm:text-[34px]">Good morning, Binod.</h1><p className="mt-2 text-[15px] text-[#73807a]">Here’s what deserves your attention — and what doesn’t.</p></div><button onClick={openDigest} className="flex h-11 items-center justify-center gap-2 rounded-xl bg-[#1f4739] px-4 text-sm font-semibold text-white shadow-sm hover:bg-[#17392e]"><Sparkles size={16} className="text-[#d8f26a]"/>Catch me up</button></div><div className="grid grid-cols-2 gap-3 sm:grid-cols-4">{[{label:"Updates scanned",value:"184",sub:"+21 today"},{label:"Need attention",value:"4",sub:"2 time-sensitive"},{label:"Noise reduced",value:"138",sub:"75% filtered"},{label:"Time saved",value:"58m",sub:"vs. reading all"}].map(s=><div key={s.label} className="rounded-2xl border border-[#e1e6e3] bg-white px-4 py-3.5 card-shadow"><div className="text-[12px] font-medium text-[#7f8984]">{s.label}</div><div className="mt-1 text-2xl font-bold tracking-[-.04em]">{s.value}</div><div className="mt-0.5 text-[11px] text-[#739083]">{s.sub}</div></div>)}</div>{query&&<div className="mt-5 text-sm text-[#68736e]">Showing {filtered.length} results for “{query}”</div>}{groups.map(g=>g.items.length>0&&<section key={g.title}><SectionHeader {...g} count={g.items.length}/><div className="space-y-3">{g.items.map(item=><FeedCard key={item.id} item={item} saved={saved.has(item.id)} read={read.has(item.id)} onSave={()=>setSaved(toggle(saved,item.id))} onRead={()=>setRead(toggle(read,item.id))} onHide={()=>setHidden(toggle(hidden,item.id))}/>)}</div></section>)}{!filtered.length&&<EmptyState icon={Search} title="Nothing found" text="Try another topic, source, or keyword."/>}</div>;
-}
-function Metric({value,label}:{value:string;label:string}){return <div className="rounded-xl border border-white/10 bg-white/[.07] p-3"><div className="text-2xl font-bold tracking-tight text-white">{value}</div><div className="mt-1 text-[11px] text-[#bcd0c7]">{label}</div></div>}
-function Digest({items,back}:{items:ScoredContentItem[];back:()=>void}){const important=items.filter(i=>i.score>=75);return <div className="animate-fade-up"><div className="dot-grid overflow-hidden rounded-[24px] bg-[#173f32] p-6 text-white sm:p-8"><div className="mb-8 flex items-center justify-between"><span className="flex items-center gap-2 text-xs font-bold uppercase tracking-[.1em] text-[#cae8da]"><Sparkles size={15} className="text-[#d8f26a]"/>Focus digest</span><span className="rounded-full bg-white/10 px-3 py-1 text-xs">Since 8:00 AM</span></div><div className="max-w-2xl"><h1 className="text-3xl font-bold tracking-[-.04em] sm:text-4xl">You missed 127 updates.<br/><span className="text-[#d8f26a]">Only 3 need your attention.</span></h1><p className="mt-4 max-w-xl text-[15px] leading-6 text-[#c8d9d2]">We grouped duplicate coverage, summarized long reads, and pushed low-value noise aside.</p></div><div className="mt-8 grid grid-cols-2 gap-2 sm:grid-cols-4"><Metric value="3" label="Must know"/><Metric value="6" label="Worth knowing"/><Metric value="118" label="Quietly handled"/><Metric value="4 min" label="Reading time"/></div></div><div className="mt-7 flex items-center justify-between"><div><h2 className="text-xl font-bold tracking-tight">Must know</h2><p className="mt-1 text-sm text-[#7a8580]">Read these first — about 2 minutes.</p></div><button onClick={back} className="text-sm font-semibold text-[#416956]">Back to feed</button></div><div className="mt-4 space-y-3">{important.slice(0,3).map((item,idx)=><div key={item.id} className="rounded-2xl border border-[#e0e5e2] bg-white p-5 card-shadow"><div className="flex gap-4"><span className="grid h-8 w-8 shrink-0 place-items-center rounded-full bg-[#fff0e9] text-sm font-bold text-[#b54d3c]">{idx+1}</span><div><div className="mb-1 text-xs font-semibold uppercase tracking-[.07em] text-[#77827d]">{item.source} · {relativeTime(item.publishedAt)}</div><h3 className="text-lg font-semibold tracking-tight">{item.title}</h3><p className="mt-2 text-sm leading-6 text-[#68736e]">{item.analysis.summary}</p><div className="mt-3 flex items-center gap-2 text-xs font-semibold text-[#47705e]"><TimerReset size={14}/>{item.analysis.actionRequired?"Action recommended":"Worth knowing today"}</div></div></div></div>)}</div><div className="mt-5 rounded-2xl border border-[#e2e6e4] bg-white p-5"><div className="flex items-center gap-3"><Archive className="text-[#587569]"/><div><h3 className="font-semibold">Everything else, summarized</h3><p className="mt-1 text-sm text-[#74807a]">118 minor updates compressed into a 6-point background brief.</p></div><button className="ml-auto rounded-lg border border-[#dce3df] px-3 py-2 text-xs font-semibold">Open brief</button></div></div></div>}
-
-function Page({title,subtitle,action,children}:{title:string;subtitle:string;action?:React.ReactNode;children:React.ReactNode}){return <div className="animate-fade-up"><div className="mb-7 flex flex-col gap-4 sm:flex-row sm:items-end sm:justify-between"><div><h1 className="text-3xl font-bold tracking-[-.045em]">{title}</h1><p className="mt-2 text-sm text-[#748079]">{subtitle}</p></div>{action}</div>{children}</div>}
-function EmptyState({icon:Icon,title,text}:{icon:typeof Search;title:string;text:string}){return <div className="mt-8 grid min-h-[260px] place-items-center rounded-2xl border border-dashed border-[#ccd5d1] bg-white/60 text-center"><div><div className="mx-auto grid h-12 w-12 place-items-center rounded-2xl bg-[#edf3f0] text-[#527160]"><Icon size={21}/></div><h3 className="mt-4 font-semibold">{title}</h3><p className="mt-1 text-sm text-[#7c8782]">{text}</p></div></div>}
-function Clusters({items}:{items:ScoredContentItem[]}){return <Page title="Story clusters" subtitle="One clear story instead of five repeated headlines."><div className="space-y-4">{items.filter(i=>(i.relatedSources??0)>1).map(item=><article key={item.id} className="rounded-2xl border border-[#dfe5e2] bg-white p-5 card-shadow sm:p-6"><div className="flex flex-col gap-4 sm:flex-row sm:items-start"><div className="grid h-12 w-12 shrink-0 place-items-center rounded-xl bg-[#e9f3ee] text-[#2f6550]"><Layers3 size={21}/></div><div className="flex-1"><div className="mb-2 flex items-center gap-2 text-xs font-semibold text-[#6e7a74]"><span className="rounded-full bg-[#edf3f0] px-2 py-1">{item.relatedSources} sources</span><span>Updated {relativeTime(item.publishedAt)}</span></div><h2 className="text-xl font-semibold tracking-tight">{item.title}</h2><p className="mt-2 text-sm leading-6 text-[#66716c]">{item.analysis.summary}</p><div className="mt-4 flex flex-wrap gap-2">{[item.source,"Reuters","Hacker News","TechCrunch"].slice(0,Math.min(item.relatedSources??1,4)).map(source=><span key={source} className="rounded-lg border border-[#e0e5e2] px-2.5 py-1.5 text-xs text-[#64706a]">{source}</span>)}</div></div><ScoreRing score={item.score}/></div></article>)}</div></Page>}
-function Saved({items,saved}:{items:ScoredContentItem[];saved:Set<string>}){const list=items.filter(i=>saved.has(i.id));return <Page title="Saved for later" subtitle="A calm reading list, ready when you are.">{list.length?<div className="space-y-3">{list.map(item=><div key={item.id} className="rounded-2xl border border-[#e0e5e2] bg-white p-5"><div className="text-xs font-semibold text-[#6c7973]">{item.source} · {item.analysis.category}</div><h3 className="mt-2 text-lg font-semibold">{item.title}</h3><p className="mt-2 text-sm leading-6 text-[#6d7873]">{item.analysis.summary}</p></div>)}</div>:<EmptyState icon={Bookmark} title="Your reading list is empty" text="Bookmark anything in the Smart Feed and it will appear here."/>}</Page>}
-
-const volumeData=[{day:"Mon",raw:132,useful:31},{day:"Tue",raw:168,useful:38},{day:"Wed",raw:151,useful:29},{day:"Thu",raw:184,useful:46},{day:"Fri",raw:139,useful:33},{day:"Sat",raw:92,useful:20},{day:"Sun",raw:108,useful:24}];
-const categoryData=[{name:"AI & Tech",value:34,color:"#315f4c"},{name:"College",value:24,color:"#8daf6b"},{name:"Cricket",value:18,color:"#e6aa4b"},{name:"Research",value:14,color:"#6a91b5"},{name:"Other",value:10,color:"#c9cfcc"}];
-function ChartCard({title,subtitle,children}:{title:string;subtitle:string;children:React.ReactNode}){return <div className="rounded-2xl border border-[#e0e5e2] bg-white p-5 card-shadow"><h3 className="font-semibold tracking-tight">{title}</h3><p className="mb-4 mt-1 text-xs text-[#85908b]">{subtitle}</p>{children}</div>}
-function Insights(){return <Page title="Attention insights" subtitle="See what reached you, what mattered, and what FocusFlow filtered out."><div className="grid grid-cols-2 gap-3 lg:grid-cols-4">{[{l:"Information received",v:"184",d:"+12% vs yesterday"},{l:"Critical items",v:"4",d:"2 completed"},{l:"Duplicates grouped",v:"42",d:"Across 11 stories"},{l:"Time saved",v:"58 min",d:"Today"}].map(s=><div key={s.l} className="rounded-2xl border border-[#e0e5e2] bg-white p-4 card-shadow"><div className="text-xs font-medium text-[#7c8782]">{s.l}</div><div className="mt-2 text-2xl font-bold tracking-tight">{s.v}</div><div className="mt-1 text-xs text-[#64806f]">{s.d}</div></div>)}</div><div className="mt-4 grid gap-4 lg:grid-cols-[1.55fr_1fr]"><ChartCard title="Information volume" subtitle="Raw volume compared with items worth your attention"><ResponsiveContainer width="100%" height={245}><AreaChart data={volumeData}><defs><linearGradient id="raw" x1="0" y1="0" x2="0" y2="1"><stop offset="5%" stopColor="#315f4c" stopOpacity={.28}/><stop offset="95%" stopColor="#315f4c" stopOpacity={0}/></linearGradient></defs><CartesianGrid strokeDasharray="3 3" vertical={false} stroke="#edf0ef"/><XAxis dataKey="day" axisLine={false} tickLine={false}/><YAxis axisLine={false} tickLine={false}/><Tooltip/><Area type="monotone" dataKey="raw" stroke="#315f4c" strokeWidth={2} fill="url(#raw)"/><Area type="monotone" dataKey="useful" stroke="#e4a646" strokeWidth={2} fill="transparent"/></AreaChart></ResponsiveContainer></ChartCard><ChartCard title="Attention by category" subtitle="Share of items you engaged with"><ResponsiveContainer width="100%" height={210}><PieChart><Pie data={categoryData} dataKey="value" innerRadius={58} outerRadius={82} paddingAngle={3}>{categoryData.map(e=><Cell key={e.name} fill={e.color}/>)}</Pie><Tooltip/></PieChart></ResponsiveContainer><div className="flex flex-wrap justify-center gap-3">{categoryData.map(d=><span key={d.name} className="flex items-center gap-1.5 text-[11px] text-[#69756f]"><span className="h-2 w-2 rounded-full" style={{background:d.color}}/>{d.name}</span>)}</div></ChartCard></div><div className="mt-4"><ChartCard title="What FocusFlow did with today’s information" subtitle="The result of scoring, clustering and summarization"><ResponsiveContainer width="100%" height={220}><BarChart data={[{name:"Critical",value:4},{name:"Important",value:15},{name:"Summarized",value:31},{name:"Duplicates",value:42},{name:"Deprioritized",value:96}]} layout="vertical"><CartesianGrid strokeDasharray="3 3" horizontal={false} stroke="#edf0ef"/><XAxis type="number" hide/><YAxis dataKey="name" type="category" axisLine={false} tickLine={false} width={90}/><Tooltip/><Bar dataKey="value" fill="#416e5a" radius={[0,7,7,0]} barSize={18}/></BarChart></ResponsiveContainer></ChartCard></div></Page>}
-
-const sourceList=[{name:"Hacker News",type:"Technology & startups",icon:Newspaper,status:"Connected",on:true},{name:"arXiv",type:"AI research papers",icon:FileText,status:"Connected",on:true},{name:"Open-Meteo",type:"Contextual weather",icon:CloudRain,status:"Connected",on:true},{name:"RSS feeds",type:"Blogs & college feeds",icon:Rss,status:"Connected",on:true},{name:"College notices",type:"Manual ingestion",icon:FileText,status:"Enabled",on:true},{name:"NewsAPI",type:"World & general news",icon:Newspaper,status:"API key needed",on:false},{name:"YouTube",type:"Videos & trends",icon:Video,status:"API key needed",on:false},{name:"CricketData",type:"Live cricket updates",icon:Flame,status:"API key needed",on:false}];
-function Sources(){const[enabled,setEnabled]=useState(()=>new Set(sourceList.filter(s=>s.on).map(s=>s.name)));const[showAdd,setShowAdd]=useState(false);return <Page title="Information sources" subtitle="Choose where FocusFlow listens. Everything is normalized before it reaches your feed." action={<button onClick={()=>setShowAdd(true)} className="flex items-center gap-2 rounded-xl bg-[#1f4739] px-4 py-2.5 text-sm font-semibold text-white"><Plus size={16}/>Add RSS feed</button>}>{showAdd&&<div className="mb-4 rounded-2xl border border-[#cbdad2] bg-white p-5 card-shadow"><div className="flex items-center justify-between"><h3 className="font-semibold">Add an RSS feed</h3><button onClick={()=>setShowAdd(false)}><X size={18}/></button></div><div className="mt-4 grid gap-3 sm:grid-cols-[1fr_1.6fr_1fr_auto]"><input className="rounded-xl border border-[#dfe5e2] px-3 py-2.5 text-sm" placeholder="Feed name"/><input className="rounded-xl border border-[#dfe5e2] px-3 py-2.5 text-sm" placeholder="https://example.com/feed.xml"/><select className="rounded-xl border border-[#dfe5e2] px-3 py-2.5 text-sm"><option>Technology</option><option>College</option><option>Research</option></select><button onClick={()=>setShowAdd(false)} className="rounded-xl bg-[#1f4739] px-4 text-sm font-semibold text-white">Validate & add</button></div></div>}<div className="grid gap-3 md:grid-cols-2">{sourceList.map(source=>{const Icon=source.icon,on=enabled.has(source.name);return <div key={source.name} className="flex items-center gap-4 rounded-2xl border border-[#e0e5e2] bg-white p-4 card-shadow"><div className="grid h-11 w-11 place-items-center rounded-xl bg-[#eff4f1] text-[#3d6755]"><Icon size={20}/></div><div className="min-w-0 flex-1"><div className="font-semibold">{source.name}</div><div className="mt-0.5 text-xs text-[#7b8681]">{source.type}</div><div className={`mt-2 text-[11px] font-semibold ${source.status.includes("needed")?"text-[#aa7421]":"text-[#448064]"}`}>{source.status}</div></div><button aria-label={`Toggle ${source.name}`} onClick={()=>{const n=new Set(enabled);if(on)n.delete(source.name);else n.add(source.name);setEnabled(n)}} className={`relative h-6 w-11 rounded-full transition ${on?"bg-[#356951]":"bg-[#cfd6d2]"}`}><span className={`absolute top-1 h-4 w-4 rounded-full bg-white transition ${on?"left-6":"left-1"}`}/></button></div>})}</div><div className="mt-4 rounded-2xl border border-dashed border-[#cad4cf] bg-[#f8faf9] p-5"><div className="flex items-start gap-3"><Plus className="mt-0.5 text-[#517160]" size={19}/><div><h3 className="font-semibold">Add college notice</h3><p className="mt-1 text-sm text-[#727f78]">Paste a title and notice text. FocusFlow detects deadlines, exams, submissions and required actions.</p><button className="mt-3 rounded-lg border border-[#d7dfdb] bg-white px-3 py-2 text-xs font-semibold">Open notice form</button></div></div></div></Page>}
-function SettingCard({title,description,icon:Icon,children}:{title:string;description:string;icon:typeof Bell;children:React.ReactNode}){return <section className="rounded-2xl border border-[#e0e5e2] bg-white p-5 card-shadow"><div className="mb-5 flex gap-3"><div className="grid h-10 w-10 place-items-center rounded-xl bg-[#edf4f0] text-[#3f6857]"><Icon size={19}/></div><div><h2 className="font-semibold">{title}</h2><p className="mt-0.5 text-xs text-[#7f8984]">{description}</p></div></div>{children}</section>}
-function SettingsView(){const[quiet,setQuiet]=useState(true);const[threshold,setThreshold]=useState(85);return <Page title="Attention settings" subtitle="Decide when information can interrupt you — and when it should wait."><div className="space-y-4"><SettingCard title="Quiet hours" description="Non-critical updates wait until quiet hours end." icon={Clock3}><div className="flex flex-wrap items-center gap-3"><button onClick={()=>setQuiet(!quiet)} className={`relative h-6 w-11 rounded-full ${quiet?"bg-[#356951]":"bg-[#ccd3cf]"}`}><span className={`absolute top-1 h-4 w-4 rounded-full bg-white transition ${quiet?"left-6":"left-1"}`}/></button><input type="time" defaultValue="22:00" className="rounded-lg border border-[#dfe4e2] px-3 py-2 text-sm"/><span className="text-sm text-[#7b8681]">to</span><input type="time" defaultValue="07:00" className="rounded-lg border border-[#dfe4e2] px-3 py-2 text-sm"/></div></SettingCard><SettingCard title="Notification threshold" description="Only interrupt me when an item reaches this score." icon={Bell}><div className="flex items-center gap-4"><input aria-label="Notification threshold" type="range" min="50" max="100" value={threshold} onChange={e=>setThreshold(Number(e.target.value))} className="w-full max-w-sm accent-[#356951]"/><span className="min-w-12 rounded-lg bg-[#edf4f0] px-3 py-2 text-center text-sm font-bold text-[#315f4c]">{threshold}</span></div></SettingCard><SettingCard title="Digest schedule" description="Bundle everything that can wait into a calm summary." icon={TimerReset}><div className="grid gap-2 sm:grid-cols-4">{["Morning","Evening","Every 4 hours","Manual only"].map((x,i)=><button key={x} className={`rounded-xl border px-3 py-2.5 text-sm font-medium ${i===0?"border-[#8fb3a1] bg-[#edf6f1] text-[#315f4c]":"border-[#e0e5e2] text-[#6c7772]"}`}>{x}</button>)}</div></SettingCard><SettingCard title="Your priority topics" description="The scoring engine uses these weights — you can change them anytime." icon={BrainCircuit}><div className="flex flex-wrap gap-2">{["College · High","AI · High","Cricket · High","Technology · Medium","Programming · Medium","Research · Medium"].map(x=><button key={x} className="rounded-full border border-[#dce3df] bg-[#f8faf9] px-3 py-1.5 text-xs font-semibold text-[#58665f]">{x}</button>)}<button className="rounded-full border border-dashed border-[#aebbb4] px-3 py-1.5 text-xs font-semibold text-[#517160]">+ Add topic</button></div></SettingCard></div></Page>}
-
-export function DashboardClient({initialItems}:{initialItems:ScoredContentItem[]}){const[view,setView]=useState<View>("feed");const[menu,setMenu]=useState(false);const[query,setQuery]=useState("");const[saved,setSaved]=useState<Set<string>>(new Set());const[read,setRead]=useState<Set<string>>(new Set());const[hidden,setHidden]=useState<Set<string>>(new Set());const content=useMemo(()=>{if(view==="feed")return <SmartFeed items={initialItems} query={query} saved={saved} read={read} setSaved={setSaved} setRead={setRead} hidden={hidden} setHidden={setHidden} openDigest={()=>setView("digest")}/>;if(view==="digest")return <Digest items={initialItems} back={()=>setView("feed")}/>;if(view==="clusters")return <Clusters items={initialItems}/>;if(view==="saved")return <Saved items={initialItems} saved={saved}/>;if(view==="insights")return <Insights/>;if(view==="sources")return <Sources/>;return <SettingsView/>},[view,query,saved,read,hidden,initialItems]);return <div className="min-h-screen bg-[#f5f7f6]"><Sidebar view={view} setView={setView} open={menu} close={()=>setMenu(false)}/><div className="lg:pl-[248px]"><Header setMenu={()=>setMenu(true)} query={query} setQuery={setQuery}/><main className="mx-auto max-w-[1080px] px-4 py-6 sm:px-7 sm:py-8">{content}</main></div></div>}
